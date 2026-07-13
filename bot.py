@@ -940,7 +940,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # ── IMMUNE USER — skip ALL checks + can use .kick / .timeout ────────────
+    # ── IMMUNE USER — skip ALL checks + can use .kick / .timeout / .ban ────────────
     if is_immune(member):
 
         # ── !honeypot — turn current channel into a honeypot ────────────────
@@ -1093,25 +1093,25 @@ async def on_message(message: discord.Message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
-        # ── .kick @user [reason] ──────────────────────────────────────────────
+        # ── .kick <userid> [reason] ──────────────────────────────────────────────
         if content.startswith(".kick"):
-            target = message.mentions[0] if message.mentions else None
-            if not target:
-                # try raw ID after .kick
-                parts = content.split()
-                if len(parts) > 1:
-                    try:
-                        target = message.guild.get_member(int(parts[1]))
-                    except ValueError:
-                        pass
+            parts = content.split()
+            if len(parts) < 2:
+                await message.channel.send("❌ Usage: `.kick <user_id> [reason]`")
+                return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid user ID.")
+                return
+            target = message.guild.get_member(target_id)
             if target is None:
-                await message.channel.send("❌ Usage: `.kick @user [reason]`")
+                await message.channel.send("❌ User not found in this server.")
                 return
             if target.id in IMMUNE_USER_IDS:
                 await message.channel.send("❌ Cannot kick an immune user.")
                 return
-            parts = content.split(maxsplit=2)
-            reason = parts[2] if len(parts) > 2 else "Kicked by authorized user"
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "Kicked by authorized user"
             try:
                 await target.kick(reason=reason)
                 await message.channel.send(f"👢 **{target}** has been kicked. Reason: {reason}")
@@ -1129,36 +1129,67 @@ async def on_message(message: discord.Message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
-        # ── .timeout @user <duration> [reason] ───────────────────────────────
+        # ── .ban <userid> [reason] ──────────────────────────────────────────────
+        if content.startswith(".ban"):
+            parts = content.split()
+            if len(parts) < 2:
+                await message.channel.send("❌ Usage: `.ban <user_id> [reason]`")
+                return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid user ID.")
+                return
+            target = message.guild.get_member(target_id)
+            if target is None:
+                # Try to fetch user even if not in guild (for ban)
+                try:
+                    target = await bot.fetch_user(target_id)
+                except discord.NotFound:
+                    await message.channel.send("❌ User not found.")
+                    return
+            if target.id in IMMUNE_USER_IDS:
+                await message.channel.send("❌ Cannot ban an immune user.")
+                return
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "Banned by authorized user"
+            try:
+                await message.guild.ban(target, reason=reason, delete_message_days=1)
+                await message.channel.send(f"🔨 **{target}** has been banned. Reason: {reason}")
+                add_log("🔨 Manual Ban", str(member), member.id, message.channel.name, f"Banned {target} — {reason}")
+                log_channel = message.guild.get_channel(CONFIG["log_channel_id"])
+                if log_channel:
+                    embed = discord.Embed(title="🔨 Manual Ban", color=discord.Color.dark_red(), timestamp=discord.utils.utcnow())
+                    embed.add_field(name="Banned by", value=f"{member.mention} ({member})", inline=True)
+                    embed.add_field(name="Target",    value=f"{target.mention} ({target})", inline=True)
+                    embed.add_field(name="Reason",    value=reason, inline=False)
+                    await log_channel.send(embed=embed)
+            except discord.Forbidden:
+                await message.channel.send("❌ Bot does not have permission to ban this user.")
+            except discord.HTTPException as e:
+                await message.channel.send(f"❌ Error: {e}")
+            return
+
+        # ── .timeout <userid> <duration> [reason] ──────────────────────────────
         # Duration examples: 10s  5m  2h  1d  (seconds/minutes/hours/days)
         if content.startswith(".timeout"):
-            target = message.mentions[0] if message.mentions else None
             parts = content.split()
-            # parse: .timeout @user 10m [reason...]
-            # parts[0]=.timeout  parts[1]=mention_or_id  parts[2]=duration  parts[3+]=reason
-            if target is None and len(parts) > 1:
-                try:
-                    target = message.guild.get_member(int(parts[1]))
-                except ValueError:
-                    pass
+            if len(parts) < 3:
+                await message.channel.send("❌ Usage: `.timeout <user_id> <duration> [reason]`\nDuration: `10s` `5m` `2h` `1d`")
+                return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid user ID.")
+                return
+            target = message.guild.get_member(target_id)
             if target is None:
-                await message.channel.send("❌ Usage: `.timeout @user <duration> [reason]`\nDuration: `10s` `5m` `2h` `1d`")
+                await message.channel.send("❌ User not found in this server.")
                 return
             if target.id in IMMUNE_USER_IDS:
                 await message.channel.send("❌ Cannot timeout an immune user.")
                 return
-            # find duration arg (first arg that is not a mention / ID)
-            duration_str = None
-            reason_start = 3
-            for i, p in enumerate(parts[1:], 1):
-                if not p.startswith("<@") and not p.lstrip("-").isdigit():
-                    duration_str = p
-                    reason_start = i + 1
-                    break
-            if not duration_str:
-                await message.channel.send("❌ Please provide a duration. Examples: `10s` `5m` `2h` `1d`")
-                return
             # parse duration
+            duration_str = parts[2]
             unit_map = {"s": 1, "m": 60, "h": 3600, "d": 86400}
             unit = duration_str[-1].lower()
             if unit not in unit_map or not duration_str[:-1].isdigit():
@@ -1171,7 +1202,7 @@ async def on_message(message: discord.Message):
             if seconds > 86400 * 28:
                 await message.channel.send("❌ Maximum timeout is 28 days.")
                 return
-            reason = " ".join(parts[reason_start:]) if len(parts) > reason_start else "Timed out by authorized user"
+            reason = " ".join(parts[3:]) if len(parts) > 3 else "Timed out by authorized user"
             label = duration_str.lower()
             try:
                 await target.timeout(timedelta(seconds=seconds), reason=reason)
