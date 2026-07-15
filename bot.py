@@ -940,7 +940,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # ── IMMUNE USER — skip ALL checks + can use .kick / .timeout / .ban ────────────
+    # ── IMMUNE USER — skip ALL checks + can use ALL admin commands ────────────
     if is_immune(member):
 
         # ── !honeypot — turn current channel into a honeypot ────────────────
@@ -1061,18 +1061,20 @@ async def on_message(message: discord.Message):
             add_log("✅ Whitelist Add", str(member), member.id, message.channel.name, f"Whitelisted user {wid}")
             return
 
-        # ── .untimeout @user / userid ────────────────────────────────────────
+        # ── .untimeout <userid> ────────────────────────────────────────
         if content.startswith(".untimeout"):
-            target = message.mentions[0] if message.mentions else None
-            if not target:
-                parts = content.split()
-                if len(parts) > 1:
-                    try:
-                        target = message.guild.get_member(int(parts[1]))
-                    except ValueError:
-                        pass
+            parts = content.split()
+            if len(parts) < 2:
+                await message.channel.send("❌ Usage: `.untimeout <user_id>`")
+                return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid user ID.")
+                return
+            target = message.guild.get_member(target_id)
             if target is None:
-                await message.channel.send("❌ Usage: `.untimeout @user` or `.untimeout <user_id>`")
+                await message.channel.send("❌ User not found in this server.")
                 return
             if target.id in IMMUNE_USER_IDS:
                 await message.channel.send("❌ Cannot untimeout an immune user.")
@@ -1152,6 +1154,34 @@ async def on_message(message: discord.Message):
                 await message.channel.send("❌ Cannot ban an immune user.")
                 return
             reason = " ".join(parts[2:]) if len(parts) > 2 else "Banned by authorized user"
+
+            # Build DM embed for banned user
+            dm_ban_embed = discord.Embed(
+                title="🔨 You have been banned",
+                color=discord.Color.dark_red(),
+                timestamp=discord.utils.utcnow()
+            )
+            dm_ban_embed.add_field(name="Server", value=SERVER_NAME, inline=False)
+            dm_ban_embed.add_field(name="Reason", value=reason, inline=False)
+            # Get first immune user for unban contact
+            immune_contact = f"<@{list(IMMUNE_USER_IDS)[0]}>"
+            dm_ban_embed.add_field(
+                name="Unban",
+                value=f"DM {immune_contact} to apply for unban.",
+                inline=False
+            )
+            dm_ban_embed.add_field(
+                name="0v6u this Discord user",
+                value=f"User ID: `{target.id}`",
+                inline=False
+            )
+            dm_ban_embed.set_footer(text=f"Banned by {member}")
+
+            try:
+                await target.send(embed=dm_ban_embed)
+            except discord.Forbidden:
+                pass  # Can't DM user
+
             try:
                 await message.guild.ban(target, reason=reason, delete_message_days=1)
                 await message.channel.send(f"🔨 **{target}** has been banned. Reason: {reason}")
@@ -1169,6 +1199,62 @@ async def on_message(message: discord.Message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
+        # ── .unban <userid> [reason] ──────────────────────────────────────────────
+        if content.startswith(".unban"):
+            parts = content.split()
+            if len(parts) < 2:
+                await message.channel.send("❌ Usage: `.unban <user_id> [reason]`")
+                return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid user ID.")
+                return
+
+            # Check if user is actually banned
+            try:
+                ban_entry = await message.guild.fetch_ban(discord.Object(id=target_id))
+                target = ban_entry.user
+            except discord.NotFound:
+                await message.channel.send("❌ This user is not banned.")
+                return
+            except discord.Forbidden:
+                await message.channel.send("❌ Bot does not have permission to view bans.")
+                return
+
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "Unbanned by authorized user"
+
+            try:
+                await message.guild.unban(target, reason=reason)
+                await message.channel.send(f"✅ **{target}** has been unbanned. Reason: {reason}")
+                add_log("✅ Manual Unban", str(member), member.id, message.channel.name, f"Unbanned {target} — {reason}")
+
+                # Try to DM the unbanned user
+                try:
+                    dm_unban_embed = discord.Embed(
+                        title="✅ You have been unbanned",
+                        description=f"You have been unbanned from **{SERVER_NAME}**.",
+                        color=discord.Color.green(),
+                        timestamp=discord.utils.utcnow()
+                    )
+                    dm_unban_embed.add_field(name="Reason", value=reason, inline=False)
+                    dm_unban_embed.set_footer(text=f"Unbanned by {member}")
+                    await target.send(embed=dm_unban_embed)
+                except discord.Forbidden:
+                    pass
+
+                log_channel = message.guild.get_channel(CONFIG["log_channel_id"])
+                if log_channel:
+                    embed = discord.Embed(title="✅ Manual Unban", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+                    embed.add_field(name="Unbanned by", value=f"{member.mention} ({member})", inline=True)
+                    embed.add_field(name="Target",      value=f"{target.mention} ({target})", inline=True)
+                    embed.add_field(name="Reason",      value=reason, inline=False)
+                    await log_channel.send(embed=embed)
+            except discord.Forbidden:
+                await message.channel.send("❌ Bot does not have permission to unban this user.")
+            except discord.HTTPException as e:
+                await message.channel.send(f"❌ Error: {e}")
+            return
         # ── .timeout <userid> <duration> [reason] ──────────────────────────────
         # Duration examples: 10s  5m  2h  1d  (seconds/minutes/hours/days)
         if content.startswith(".timeout"):
